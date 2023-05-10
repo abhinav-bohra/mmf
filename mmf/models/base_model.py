@@ -53,11 +53,12 @@ from mmf.common.report import Report
 from mmf.common.sample import SampleList, to_device
 from mmf.modules.losses import LossConfig, Losses
 from mmf.utils.checkpoint import load_pretrained_model
+from mmf.utils.checkpoint_updater import MMFToPLCheckpointUpdater
 from mmf.utils.download import download_pretrained_model
 from mmf.utils.file_io import PathManager
 from mmf.utils.general import get_current_device
 from mmf.utils.logger import log_class_usage
-from omegaconf import MISSING, DictConfig, OmegaConf
+from omegaconf import DictConfig, MISSING, OmegaConf
 
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,7 @@ class BaseModel(pl.LightningModule):
         self._logged_warning = {"losses_present": False}
         self._is_pretrained = False
         self._is_pl_enabled = False
+        self.checkpoint_updater = None
 
         log_class_usage("Model", self.__class__)
 
@@ -114,7 +116,25 @@ class BaseModel(pl.LightningModule):
         self._is_pl_enabled = x
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        """
+        This is called by the pl.LightningModule before the model's checkpoint
+        is loaded.
+        """
         self.build()
+
+        if self.checkpoint_updater is None:
+            self.checkpoint_updater = MMFToPLCheckpointUpdater()
+
+        self.checkpoint_updater.update_checkpoint(checkpoint, self)
+
+    def _run_format_state_key(self, state_dict: Dict[str, Any]) -> None:
+        """Function to rewrtie the checkpoint in place"""
+        tmp_state_dict = dict(state_dict)
+        for attr in tmp_state_dict:
+            new_attr = self.format_state_key(attr)
+            if attr != new_attr:
+                value = state_dict.pop(attr)
+                state_dict[new_attr] = value
 
     def build(self):
         """Function to be implemented by the child class, in case they need to
@@ -172,6 +192,17 @@ class BaseModel(pl.LightningModule):
 
         return super().load_state_dict(copied_state_dict, *args, **kwargs)
 
+    def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        super().on_save_checkpoint(checkpoint)
+
+        config = registry.get("config")
+        config_dict = OmegaConf.to_container(config, resolve=True)
+        checkpoint["config"] = config_dict
+
+        # TODO: add git features, for example:
+        # 'git/branch', 'git/commit_hash', 'git/commit_author',
+        # 'git/commit_message', 'git/diff'
+
     def forward(self, sample_list, *args, **kwargs):
         """To be implemented by child class. Takes in a ``SampleList`` and
         returns back a dict.
@@ -201,8 +232,9 @@ class BaseModel(pl.LightningModule):
             Dict: Dict containing loss.
         """
         output = self._forward_lightning_step(batch, batch_idx)
-        report = Report(batch, output).detach()
-        self.train_meter.update_from_report(report)
+        if hasattr(self, "train_meter"):
+            report = Report(batch, output).detach()
+            self.train_meter.update_from_report(report)
         return output
 
     def validation_step(self, batch: SampleList, batch_idx: int, *args, **kwargs):
@@ -218,10 +250,11 @@ class BaseModel(pl.LightningModule):
             Dict
         """
         output = self._forward_lightning_step(batch, batch_idx)
-        report = Report(batch, output).detach()
-        self.val_meter.update_from_report(report, should_update_loss=False)
-        report.metrics = self.metrics(report, report)
-        self.log_dict(report.metrics)
+        if hasattr(self, "val_meter"):
+            report = Report(batch, output).detach()
+            self.val_meter.update_from_report(report, should_update_loss=False)
+            report.metrics = self.metrics(report, report)
+            self.log_dict(report.metrics)
         return output
 
     def test_step(self, batch: SampleList, batch_idx: int, *args, **kwargs):
@@ -253,7 +286,7 @@ class BaseModel(pl.LightningModule):
                 output[key] = output[key].detach()
 
     def configure_optimizers(self):
-        """ Member function of PL modules. Used only when PL enabled."""
+        """Member function of PL modules. Used only when PL enabled."""
         assert self._is_pl_enabled, (
             "configure_optimizers should be only used as a member "
             "function of LightningModule when pytorch lightning is enabled."

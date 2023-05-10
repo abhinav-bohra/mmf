@@ -10,7 +10,7 @@ from typing import Dict, List
 import torch
 from mmf.utils.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
 from scipy.optimize import linear_sum_assignment
-from torch import Tensor, nn
+from torch import nn, Tensor
 
 
 class HungarianMatcher(nn.Module):
@@ -52,7 +52,7 @@ class HungarianMatcher(nn.Module):
 
     @torch.no_grad()
     def forward(self, outputs: Dict[str, Tensor], targets: List[Dict[str, Tensor]]):
-        """ Performs the matching
+        """Performs the matching
 
         Params:
             outputs: This is a dict that contains at least these entries:

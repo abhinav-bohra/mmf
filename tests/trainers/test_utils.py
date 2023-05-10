@@ -43,7 +43,7 @@ def get_trainer_config():
                 "params": {
                     "gpus": 1 if torch.cuda.is_available() else 0,
                     "num_nodes": 1,
-                    "checkpoint_callback": False,
+                    "enable_checkpointing": False,
                     "deterministic": True,
                     "benchmark": False,
                     "gradient_clip_val": 0.0,
@@ -102,7 +102,7 @@ def get_lightning_trainer(
     prepare_trainer=True,
     load_model_from_config=False,
     seed=2,
-    **kwargs
+    **kwargs,
 ):
     torch.random.manual_seed(seed)
     trainer = LightningTrainerMock(config=config, **kwargs)
@@ -138,7 +138,7 @@ def run_lightning_trainer(trainer, on_fit_start_callback=None):
 
     trainer.trainer.fit(
         trainer.model,
-        train_dataloader=trainer.train_loader,
+        train_dataloaders=trainer.train_loader,
         val_dataloaders=trainer.val_loader,
     )
     trainer.run_last_validation_after_train()

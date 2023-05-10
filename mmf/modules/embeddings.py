@@ -14,8 +14,12 @@ from mmf.modules.bottleneck import MovieBottleneck
 from mmf.modules.layers import AttnPool1d, Identity
 from mmf.utils.file_io import PathManager
 from mmf.utils.vocab import Vocab
-from torch import Tensor, nn
-from transformers.modeling_bert import BertEmbeddings
+from torch import nn, Tensor
+
+try:
+    from transformers3.modeling_bert import BertEmbeddings
+except ImportError:
+    from transformers.modeling_bert import BertEmbeddings
 
 
 class TextEmbedding(nn.Module):
@@ -346,7 +350,6 @@ class BertVisioLinguisticEmbeddings(BertEmbeddings):
         visual_embeddings_type: Tensor,
         image_text_alignment: Optional[Tensor] = None,
     ) -> Tensor:
-
         visual_embeddings = self.projection(visual_embeddings)
         token_type_embeddings_visual = self.token_type_embeddings_visual(
             visual_embeddings_type
@@ -369,7 +372,6 @@ class BertVisioLinguisticEmbeddings(BertEmbeddings):
     def get_position_embeddings_visual(
         self, visual_embeddings: Tensor, image_text_alignment: Optional[Tensor] = None
     ) -> Tensor:
-
         if image_text_alignment is not None:
             # image_text_alignment = Batch x image_length x alignment_number.
             # Each element denotes the position of the word corresponding to the
@@ -458,8 +460,7 @@ class BertVisioLinguisticEmbeddings(BertEmbeddings):
 
 
 class SAEmbedding(nn.Module):
-    """Encoder block implementation in MCAN https://arxiv.org/abs/1906.10770
-    """
+    """Encoder block implementation in MCAN https://arxiv.org/abs/1906.10770"""
 
     def __init__(self, hidden_dim: int, embedding_dim: int, **kwargs):
         super().__init__()
@@ -501,8 +502,7 @@ class SAEmbedding(nn.Module):
 
 
 class SGAEmbedding(nn.Module):
-    """Decoder block implementation in MCAN https://arxiv.org/abs/1906.10770
-    """
+    """Decoder block implementation in MCAN https://arxiv.org/abs/1906.10770"""
 
     def __init__(self, embedding_dim: int, **kwargs):
         super().__init__()
@@ -540,8 +540,7 @@ class SGAEmbedding(nn.Module):
 
 
 class CBNEmbedding(nn.Module):
-    """MoVie bottleneck layers from https://arxiv.org/abs/2004.11883
-    """
+    """MoVie bottleneck layers from https://arxiv.org/abs/2004.11883"""
 
     def __init__(self, embedding_dim: int, **kwargs):
         super().__init__()
@@ -587,7 +586,6 @@ class CBNEmbedding(nn.Module):
             cbn.init_layers()
 
     def forward(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-
         for cbn in self.cbns:
             x, _ = cbn(x, v)
 

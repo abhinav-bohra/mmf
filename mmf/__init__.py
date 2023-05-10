@@ -5,8 +5,8 @@ from mmf.utils.patch import patch_transformers
 
 patch_transformers()
 
-from mmf import utils, common, modules, datasets, models
-from mmf.modules import losses, schedulers, optimizers, metrics
+from mmf import common, datasets, models, modules, utils
+from mmf.modules import losses, metrics, optimizers, poolers, schedulers
 from mmf.version import __version__
 
 
@@ -17,6 +17,7 @@ __all__ = [
     "datasets",
     "models",
     "losses",
+    "poolers",
     "schedulers",
     "optimizers",
     "metrics",

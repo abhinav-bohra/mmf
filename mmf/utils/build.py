@@ -18,7 +18,7 @@ from mmf.datasets.iteration_strategies import (
 )
 from mmf.datasets.processors.processors import Processor
 from mmf.utils.configuration import Configuration, get_global_config
-from mmf.utils.distributed import is_dist_initialized, is_master, is_xla, synchronize
+from mmf.utils.distributed import is_dist_initialized, is_main, is_xla, synchronize
 from mmf.utils.general import get_optimizer_parameters
 from omegaconf import DictConfig, OmegaConf
 from packaging import version
@@ -96,13 +96,17 @@ def build_lightning_model(
     https://github.com/PyTorchLightning/pytorch-lightning/issues/5410
     """
 
-    if is_master():
+    if is_main():
         model_class.load_requirements(model_class, config=config)
-        model = model_class.load_from_checkpoint(checkpoint_path, config=config)
+        model = model_class.load_from_checkpoint(
+            checkpoint_path, config=config, strict=False
+        )
         synchronize()
     else:
         synchronize()
-        model = model_class.load_from_checkpoint(checkpoint_path, config=config)
+        model = model_class.load_from_checkpoint(
+            checkpoint_path, config=config, strict=False
+        )
 
     model.init_losses()
     model.is_pl_enabled = True
@@ -136,7 +140,7 @@ def build_model(
         now other cores can proceed to build the model
         using already downloaded checkpoint.
         """
-        if is_master():
+        if is_main():
             model_class.load_requirements(model_class, config=config)
             model.build()
             synchronize()
@@ -246,7 +250,7 @@ def build_multiple_datamodules(
             )
             dataset_config = OmegaConf.create()
 
-        if is_master():
+        if is_main():
             datamodule_instance.prepare_data(dataset_config)
 
         synchronize()
@@ -312,6 +316,8 @@ def build_dataloader_and_sampler(
     else:
         other_args.pop("shuffle")
 
+    # Set drop_last=True when using XLA to have constant batch size.
+    # In this case we also need to set drop_last=True in DistributedSampler.
     loader = torch.utils.data.DataLoader(
         dataset=dataset_instance,
         collate_fn=BatchCollator(
@@ -386,6 +392,7 @@ def _add_extra_args_for_dataloader(
             num_replicas=xm.xrt_world_size(),
             rank=xm.get_ordinal(),
             shuffle=other_args["shuffle"],
+            drop_last=True,
         )
         other_args.pop("shuffle")
 
@@ -595,17 +602,9 @@ def build_iteration_strategy(
         # This assumes all dataloaders will have same dataset type
         iteration_strategy_class = registry.get_iteration_strategy_class(config.type)
         config = config.get("params", {})
-        dataset_type = dataloaders[list(dataloaders.keys())[0]].dataset.dataset_type
-        if dataset_type != "train":
-            logger.info(
-                f"{iteration_strategy_class.__name__} updated to size "
-                + f"proportional for {dataset_type}"
-            )
-            return SizeProportionalIterationStrategy.from_params(
-                dataloaders, *args, **kwargs
-            )
-        else:
-            return iteration_strategy_class(config, dataloaders, *args, **kwargs)
+        # val and test splits won't be affected as test reporter iterates
+        # over the datasets one by one without using any iteration strategy
+        return iteration_strategy_class(config, dataloaders, *args, **kwargs)
 
 
 def build_meters(run_type: str) -> List[Meter]:

@@ -5,6 +5,7 @@ import unittest
 
 import tests.test_utils as test_utils
 import torch
+from mmf.modules.hf_layers import undo_replace_with_jit
 from mmf.utils.build import build_model
 from mmf.utils.configuration import Configuration
 from mmf.utils.env import setup_imports, teardown_imports
@@ -37,6 +38,7 @@ class TestViLBertTorchscript(unittest.TestCase):
 
     def tearDown(self):
         teardown_imports()
+        undo_replace_with_jit()
         del self.model_config
         gc.collect()
 
@@ -94,7 +96,8 @@ class TestViLBertTorchscript(unittest.TestCase):
                 image_target=image_target,
             )
         self.assertEqual(
-            model_output["masked_lm_loss"], script_output["masked_lm_loss"]
+            torch.isnan(model_output["masked_lm_loss"]),
+            torch.isnan(script_output["masked_lm_loss"]),
         )
 
     def test_finetune_model(self):

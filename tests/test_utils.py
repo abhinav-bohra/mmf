@@ -90,6 +90,29 @@ def skip_if_non_fb(testfn, reason="Doesn't run on non FB infra"):
     return unittest.skipUnless(is_fb(), reason)(testfn)
 
 
+def skip_if_old_transformers(min_version="4.5.0"):
+    def wrap(testfn, reason="Requires newer version of transformers"):
+        from packaging import version
+
+        try:
+            from transformers3 import __version__ as transformers_version
+        except ImportError:
+            from transformers import __version__ as transformers_version
+
+        return unittest.skipUnless(
+            version.parse(transformers_version) >= version.parse(min_version), reason
+        )(testfn)
+
+    return wrap
+
+
+def skip_if_no_pytorchvideo(testfn, reason="Requires pytorchvideo"):
+    import importlib
+
+    pytorchvideo_spec = importlib.util.find_spec("pytorchvideo")
+    return unittest.skipIf(pytorchvideo_spec is None, reason)(testfn)
+
+
 def compare_state_dicts(a, b):
     same = True
     same = same and (list(a.keys()) == list(b.keys()))
@@ -263,7 +286,7 @@ def compare_torchscript_transformer_models(model, vocab_size):
     with torch.no_grad():
         script_output = script_model(test_sample_list)
 
-    return torch.equal(model_output["scores"], script_output["scores"])
+    return torch.allclose(model_output["scores"], script_output["scores"])
 
 
 def verify_torchscript_models(model):

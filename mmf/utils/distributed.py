@@ -1,11 +1,13 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 # Inspired from maskrcnn_benchmark, fairseq
+import contextlib
 import logging
 import os
 import pickle
 import socket
 import subprocess
 import warnings
+from itertools import chain
 
 import torch
 from mmf.common.registry import registry
@@ -23,7 +25,8 @@ BYTE_SIZE = 256
 logger = logging.getLogger(__name__)
 
 
-# copied from https://github.com/facebookresearch/vissl/blob/master/vissl/utils/distributed_gradients.py
+# copied from https://github.com/facebookresearch/vissl/blob/master/vissl/utils/
+# distributed_gradients.py
 class GatherLayer(torch.autograd.Function):
     """
     Gather tensors from all workers with support for backward propagation:
@@ -96,6 +99,10 @@ def get_rank():
     return dist.get_rank()
 
 
+def is_main():
+    return is_master()
+
+
 def is_master():
     return get_rank() == 0
 
@@ -124,11 +131,11 @@ def broadcast_tensor(tensor, src=0):
     with torch.no_grad():
         if is_xla():
             tensor = xm.all_to_all(
-                tensor.repeat([world_size, 1]),
+                tensor.repeat([world_size] + [1] * tensor.dim()),
                 split_dimension=0,
                 concat_dimension=0,
                 split_count=world_size,
-            )[0]
+            )[src]
         else:
             dist.broadcast(tensor, src=0)
 
@@ -166,13 +173,12 @@ def gather_tensor(tensor):
     with torch.no_grad():
         tensor_list = []
 
-        for _ in range(world_size):
-            tensor_list.append(torch.zeros_like(tensor))
-
         if is_xla():
             tensor_list = xm.all_gather(tensor)
             tensor_list = tensor_list.view(world_size, *tensor.size())
         else:
+            for _ in range(world_size):
+                tensor_list.append(torch.zeros_like(tensor))
             dist.all_gather(tensor_list, tensor)
             tensor_list = torch.stack(tensor_list, dim=0)
     return tensor_list
@@ -235,7 +241,7 @@ def reduce_dict(dictionary):
 
 
 # Object byte tensor utilities have been adopted from
-# https://github.com/pytorch/fairseq/blob/master/fairseq/distributed_utils.py
+# https://github.com/pytorch/fairseq/blob/main/fairseq/distributed_utils.py
 def object_to_byte_tensor(obj, max_size=4094):
     """
     Encode Python objects to PyTorch byte tensors
@@ -377,14 +383,15 @@ def distributed_init(config):
             os.environ["MASTER_PORT"] = split[1]
 
         # perform a dummy all-reduce to initialize the NCCL communicator
-        dist.all_reduce(torch.zeros(1).cuda())
+        dummpy_tensor = torch.zeros(1)
+        dist.all_reduce(dummpy_tensor.cuda())
 
-        suppress_output(is_master())
+        suppress_output(is_main())
         config.distributed.rank = dist.get_rank()
     return config.distributed.rank
 
 
-def suppress_output(is_master):
+def suppress_output(is_main):
     """Suppress printing on the current device. Force printing with `force=True`."""
     import builtins as __builtin__
 
@@ -392,7 +399,7 @@ def suppress_output(is_master):
 
     def print(*args, **kwargs):
         force = kwargs.pop("force", False)
-        if is_master or force:
+        if is_main or force:
             builtin_print(*args, **kwargs)
 
     __builtin__.print = print
@@ -403,9 +410,40 @@ def suppress_output(is_master):
 
     def warn(*args, **kwargs):
         force = kwargs.pop("force", False)
-        if is_master or force:
+        if is_main or force:
             builtin_warn(*args, **kwargs)
 
     # Log warnings only once
     warnings.warn = warn
     warnings.simplefilter("once", UserWarning)
+
+
+def open_if_master(path, mode):
+    from mmf.utils.file_io import PathManager
+
+    if is_main():
+        return PathManager.open(path, mode)
+    else:
+        return contextlib.nullcontext()
+
+
+def open_if_main(*args):
+    return open_if_master(*args)
+
+
+def broadcast_xla_master_model_param(model):
+    logger.info("Broadcasting XLA model parameters and buffers from master process ...")
+
+    parameters_and_buffers = []
+    for p in chain(model.parameters(), model.buffers()):
+        # Set all params in non-master devices to zero so that all_reduce is equivalent
+        # to broadcasting parameters from master to other devices.
+        if not is_main():
+            zero = torch.tensor(0, dtype=p.data.dtype, device=p.data.device)
+            p.data.mul_(zero)
+        parameters_and_buffers.append(p.data)
+    xm.wait_device_ops()
+    xm.all_reduce(xm.REDUCE_SUM, parameters_and_buffers)
+    xm.mark_step()
+    xm.rendezvous("mmf.trainers.core.device.broadcast_xla_master_model_param")
+    logger.info("Done!")

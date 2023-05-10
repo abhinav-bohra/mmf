@@ -8,8 +8,12 @@ from mmf.common.registry import registry
 from mmf.models.transformers.base import BaseTransformer, BaseTransformerBackend
 from mmf.modules.hf_layers import BertModelJit, replace_with_jit
 from omegaconf import OmegaConf
-from torch import Tensor, nn
-from transformers import AutoConfig, AutoModel
+from torch import nn, Tensor
+
+try:
+    from transformers3 import AutoConfig, AutoModel
+except ImportError:
+    from transformers import AutoConfig, AutoModel
 
 
 class HuggingfaceEmbeddings(nn.Module):
@@ -51,7 +55,6 @@ class HuggingfaceEmbeddings(nn.Module):
         )
 
     def build_layers(self):
-
         for modality in self.model_config.modalities:
             self.modality_keys.append(modality.key)
             layer_norm_eps = modality.get(
@@ -63,7 +66,7 @@ class HuggingfaceEmbeddings(nn.Module):
             hidden_dropout_prob = modality.get(
                 "hidden_dropout_prob", self.transformer_config.hidden_dropout_prob
             )
-            if modality.type == "text":
+            if modality.type == "text" and modality.get("consume_raw", True):
                 self.token_embeddings.append(
                     nn.Embedding(
                         self.transformer_config.vocab_size,

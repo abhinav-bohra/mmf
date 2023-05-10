@@ -2,12 +2,16 @@
 
 import gc
 import unittest
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from unittest.mock import MagicMock, patch
 
 from mmf.common.meter import Meter
 from mmf.trainers.callbacks.logistics import LogisticsCallback
 from mmf.trainers.lightning_core.loop_callback import LightningLoopCallback
+from mmf.trainers.lightning_core.loop_callback_with_torchmetrics import (
+    LightningTorchMetricsCallback,
+)
+from mmf.trainers.lightning_core.torchmetric import LightningTorchMetrics
 from mmf.utils.logger import TensorboardLogger
 from mmf.utils.timer import Timer
 from tests.trainers.test_utils import (
@@ -88,21 +92,46 @@ class TestLightningTrainerValidation(unittest.TestCase):
             keys = list(gt.keys())
             self.assertListEqual(keys, list(lv.keys()))
             for key in keys:
-                if key == "num_updates" and gt[key] == self.ground_truths[-1][key]:
-                    # After training, in the last evaluation run, mmf's num updates is 8
-                    # while lightning's num updates is 9, this is due to a hack to
-                    # assign the lightning num_updates to be the trainer.global_step+1.
-                    #
-                    # This is necessary because of a lightning bug: trainer.global_step
-                    # is 1 off less than the actual step count. When on_train_batch_end
-                    # is called for the first time, the trainer.global_step should be 1,
-                    # rather than 0, since 1 update/step has already been done.
-                    #
-                    # When lightning fixes its bug, we will update this test to remove
-                    # the hack
-                    self.assertAlmostEqual(gt[key], lv[key] - 1, 1)
-                else:
-                    self.assertAlmostEqual(gt[key], lv[key], 1)
+                self.assertAlmostEqual(gt[key], lv[key], 1)
+
+    # TODO: update test function with avg_loss
+    @patch("mmf.common.test_reporter.PathManager.mkdirs")
+    @patch("mmf.trainers.lightning_trainer.get_mmf_env", return_value="")
+    def test_validation_torchmetrics(self, log_dir, mkdirs):
+        config = self._get_config(
+            max_steps=8,
+            batch_size=2,
+            val_check_interval=3,
+            log_every_n_steps=9,  # turn it off
+            limit_val_batches=1.0,
+        )
+        trainer = get_lightning_trainer(config=config, prepare_trainer=False)
+        trainer.torchmetrics = LightningTorchMetrics([])
+        callback = LightningTorchMetricsCallback(trainer)
+        trainer.callbacks.append(callback)
+        lightning_values = []
+
+        def log_values(
+            extra: Optional[Dict],
+            num_updates: int,
+            max_updates: int,
+            log_type: str = "train",
+        ):
+            lightning_values.append(
+                {"num_updates": num_updates, "max_updates": max_updates}
+            )
+
+        with patch(
+            "mmf.trainers.lightning_core.loop_callback_with_torchmetrics"
+            + ".LightningTorchMetricsCallback._log_metrics_and_extra",
+            side_effect=log_values,
+        ):
+            run_lightning_trainer(trainer)
+
+        self.assertEqual(len(self.ground_truths), len(lightning_values))
+        for gt, lv in zip(self.ground_truths, lightning_values):
+            for key in ["num_updates", "max_updates"]:
+                self.assertAlmostEqual(gt[key], lv[key], 1)
 
     @patch("mmf.common.test_reporter.PathManager.mkdirs")
     @patch("torch.utils.tensorboard.SummaryWriter")

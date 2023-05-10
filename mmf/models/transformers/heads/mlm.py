@@ -1,13 +1,17 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 
+import warnings
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import torch
 from mmf.common.registry import registry
 from mmf.models.transformers.base import BaseTransformerHead
-from transformers.modeling_bert import BertOnlyMLMHead
 
+try:
+    from transformers3.modeling_bert import BertOnlyMLMHead
+except ImportError:
+    from transformers.modeling_bert import BertOnlyMLMHead
 
 LABEL_KEY = "mlm_labels"
 COMBINED_LABEL_KEY = "combined_labels"
@@ -74,9 +78,6 @@ class MLM(BaseTransformerHead):
             masked_labels = processed_sample_list[LABEL_KEY][COMBINED_LABEL_KEY]
 
         masked_tokens = masked_labels.ne(self.config.ignore_index)
-        masked_tokens = torch.where(
-            masked_tokens.any(), masked_tokens, masked_tokens.new([True])
-        )
 
         masked_labels = masked_labels[masked_tokens]
         sequence_output = sequence_output[masked_tokens, :]
@@ -87,6 +88,26 @@ class MLM(BaseTransformerHead):
             prediction.contiguous().view(-1, self.vocab_size),
             masked_labels.contiguous().view(-1),
         )
+        # When masked_labels are all ignore_index then masked_lm_loss is NaN,
+        # so we replace NaN with 0.
+        if torch.isnan(masked_lm_loss):
+            warnings.warn("NaN detected in masked_lm_loss. Replacing it with 0.")
+            masked_lm_loss = torch.nan_to_num(masked_lm_loss, nan=0.0)
         output_dict["losses"] = {}
         output_dict["losses"][self.config.loss_name] = masked_lm_loss
         return output_dict
+
+
+@registry.register_transformer_head("mlm_multi")
+class MLMForMultiHeads(BaseTransformerHead):
+    def __init__(self, config):
+        super().__init__(config)
+        self.mlm_head = MLM(config)
+
+    def forward(self, _, processed_sample_list):
+        mlm_outputs = self.mlm_head(
+            processed_sample_list["hs_masked_for_mlm"],
+            processed_sample_list=processed_sample_list,
+        )
+
+        return mlm_outputs

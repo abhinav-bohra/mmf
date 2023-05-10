@@ -20,14 +20,24 @@ from mmf.utils.transform import (
     transform_to_batch_sequence_dim,
 )
 from omegaconf import OmegaConf
-from torch import Tensor, nn
-from transformers.modeling_bert import (
-    BertConfig,
-    BertForPreTraining,
-    BertPooler,
-    BertPredictionHeadTransform,
-    BertPreTrainedModel,
-)
+from torch import nn, Tensor
+
+try:
+    from transformers3.modeling_bert import (
+        BertConfig,
+        BertForPreTraining,
+        BertPooler,
+        BertPredictionHeadTransform,
+        BertPreTrainedModel,
+    )
+except ImportError:
+    from transformers.modeling_bert import (
+        BertConfig,
+        BertForPreTraining,
+        BertPooler,
+        BertPredictionHeadTransform,
+        BertPreTrainedModel,
+    )
 
 
 class VisualBERTBase(BertPreTrainedModel):
@@ -215,9 +225,9 @@ class VisualBERTForPretraining(nn.Module):
             self.tie_weights()
 
     def tie_weights(self):
-        """ Make sure we are sharing the input and output embeddings.
-            Export to TorchScript can't handle parameter sharing so we are cloning them
-            instead.
+        """Make sure we are sharing the input and output embeddings.
+        Export to TorchScript can't handle parameter sharing so we are cloning them
+        instead.
         """
         self.bert._tie_or_clone_weights(
             self.cls.predictions.decoder, self.bert.embeddings.word_embeddings
@@ -504,7 +514,6 @@ class VisualBERT(BaseModel):
             else:
                 raise RuntimeError("nlvr2 head doesn't support scripting as of now")
         else:
-
             if not torch.jit.is_scripting():
                 image_info = getattr(sample_list, "image_info_0", {})
                 image_dim_variable = getattr(image_info, "max_features", None)

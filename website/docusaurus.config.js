@@ -21,17 +21,10 @@ module.exports = {
   projectName: 'mmf',
   themeConfig: {
     image: 'img/logo.png',
-    googleAnalytics: {
-      trackingID: 'UA-135079836-3',
-    },
-    gtag: {
-      trackingID: 'UA-135079836-3',
-    },
     colorMode: {
       defaultMode: 'light',
       disableSwitch: true,
     },
-    sidebarCollapsible: false,
     navbar: {
       title: '',
       logo: {
@@ -107,16 +100,30 @@ module.exports = {
       {
         docs: {
           sidebarPath: require.resolve('./sidebars.js'),
-          showLastUpdateAuthor: true,
-          showLastUpdateTime: true,
+          sidebarCollapsible: false,
+          showLastUpdateAuthor: fbContent({
+            internal: false,
+            external: true,
+          }),
+          showLastUpdateTime: fbContent({
+            internal: false,
+            external: true,
+          }),
           editUrl: fbContent({
             internal: 'https://www.internalfb.com/intern/diffusion/FBS/browse/master/fbcode/faim/mmf/website',
-            external: 'https://github.com/facebookresearch/mmf/edit/master/website/'
+            external: 'https://github.com/facebookresearch/mmf/edit/main/website/'
           }),
+        },
+        gtag: {
+          trackingID: 'UA-135079836-3',
+        },
+        googleAnalytics: {
+          trackingID: 'UA-135079836-3',
         },
         theme: {
           customCss: require.resolve('./src/css/custom.css'),
         },
+        enableEditor: true,
       },
     ],
   ],

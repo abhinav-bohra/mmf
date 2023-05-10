@@ -30,7 +30,9 @@ class LightningLoopCallback(Callback):
         # for logging
         self.total_timer = Timer()
         self.snapshot_timer = Timer()
-        self.snapshot_iterations = len(self.lightning_trainer.val_loader)
+        self.snapshot_iterations = 0
+        if self.lightning_trainer.val_loader.has_len():
+            self.snapshot_iterations = len(self.lightning_trainer.val_loader)
         self.train_timer = Timer()
 
     def on_train_start(self, trainer: Trainer, pl_module: LightningModule):
@@ -54,6 +56,10 @@ class LightningLoopCallback(Callback):
             SampleList(batch), batch_idx, outputs, pl_module, self.train_combined_report
         )
 
+        # Continue if an update has not finished
+        if (batch_idx + 1) % self.trainer_config.accumulate_grad_batches:
+            return
+
         # log
         if (
             self._get_num_updates_for_logging(trainer)
@@ -73,7 +79,7 @@ class LightningLoopCallback(Callback):
         self,
         trainer: Trainer,
         pl_module: LightningModule,
-        outputs: List,
+        outputs: Dict,
         batch: SampleList,
         batch_idx: int,
         dataloader_idx: int,
@@ -132,6 +138,12 @@ class LightningLoopCallback(Callback):
     ):
         report = Report(batch, step_output)
 
+        # Normalize losses
+        for key in report.losses.keys():
+            report.losses[key] = (
+                report.losses[key] / self.trainer_config.accumulate_grad_batches
+            )
+
         if update_meter:
             update_meter.update_from_report(report)
 
@@ -160,10 +172,10 @@ class LightningLoopCallback(Callback):
         return trainer.current_epoch + 1
 
     def _get_iterations_for_logging(self, trainer: Trainer):
-        return trainer.train_loop.batch_idx + 1
+        return trainer.fit_loop.batch_idx + 1
 
     def _get_num_updates_for_logging(self, trainer: Trainer):
-        return trainer.global_step + 1
+        return trainer.global_step
 
     def _train_log(self, trainer: Trainer, pl_module: LightningModule):
         self.train_combined_report = self.train_combined_report.detach()

@@ -13,7 +13,7 @@ import Layout from '@theme/Layout';
 import Link from '@docusaurus/Link';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import useBaseUrl from '@docusaurus/useBaseUrl';
-import useThemeContext from '@theme/hooks/useThemeContext';
+import {useColorMode} from '@docusaurus/theme-common';
 import styles from './styles.module.css';
 
 const features = [
@@ -53,25 +53,39 @@ const features = [
   },
 ];
 
+function SocialBanner() {
+  return (
+    <div className="socialBanner">
+      <div>
+        Support Ukraine 🇺🇦{' '}
+        <a href="https://opensource.fb.com/support-ukraine">
+          Help Provide Humanitarian Aid to Ukraine
+        </a>
+        .
+      </div>
+    </div>
+  );
+}
+
 function BannerImage() {
-  const {isDarkTheme} = useThemeContext();
+  const {colorMode} = useColorMode();
   const logoWhite = useBaseUrl('img/logo_white_text.svg');
   const logo = useBaseUrl('img/logo.svg');
   return (
     <img
       className={classnames(styles.heroImg)}
-      src={isDarkTheme ? logoWhite : logo}
+      src={colorMode === 'dark' ? logoWhite : logo}
       alt="MMF Logo"
     />
   );
 }
 
 function Feature({imageUrl, title, description}) {
-  const {isDarkTheme} = useThemeContext();
+  const {colorMode} = useColorMode();
   const withoutExtension = imageUrl.split('.')[0];
   const whiteImageUrl = useBaseUrl(`${withoutExtension}_white.svg`);
   const normalImageUrl = useBaseUrl(imageUrl);
-  const finalImageUrl = isDarkTheme ? whiteImageUrl : normalImageUrl;
+  const finalImageUrl = colorMode === 'dark' ? whiteImageUrl : normalImageUrl;
   return (
     <div className={classnames('col col--4', styles.feature, 'text--center')}>
       {finalImageUrl && (
@@ -99,6 +113,7 @@ function Home() {
         'MMF is a modular framework powered by PyTorch for multimodal vision and ' +
         'language research from Facebook AI Research'
       }>
+      <SocialBanner />
       <header className={classnames('hero hero--primary', styles.heroBanner)}>
         <div className="container">
           <div className="hero__title">

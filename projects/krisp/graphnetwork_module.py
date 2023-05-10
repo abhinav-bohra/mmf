@@ -398,7 +398,7 @@ def mmf_indirect(path):
 # Graph network module
 # Can be added as part of a larger network, or used alone using GraphNetworkBare
 class GraphNetworkModule(nn.Module):
-    """ The generic class for graph networks
+    """The generic class for graph networks
     Can be generically added to any other kind of network
     """
 
@@ -755,7 +755,6 @@ class GraphNetworkModule(nn.Module):
             for ans_str in answer_vocab.word2idx_dict:
                 # Regular, don't worry about 1-1
                 if config.okvqa_v_mode == "v1.0":
-
                     # Convert it to the most common raw answer and
                     # see if it's in the graph
                     if ans_str not in tx_data["v10_2_v11_mc"]:
@@ -963,7 +962,6 @@ class GraphNetworkModule(nn.Module):
             self.node_features_forward is None
             or batch_size * self.num_nodes != self.node_features_forward.size(0)
         ):
-
             # Allocate the data
             self.node_features_forward = torch.zeros(
                 self.num_nodes * batch_size, self.in_node_dim
@@ -1366,9 +1364,8 @@ class GraphNetwork(nn.Module):
         # Get/set parameters
         self.num_relations = num_relations
         self.num_nodes = num_nodes
-        self.in_node_dim = (
-            in_node_dim
-        )  # Passed in from GraphNetworkModule which constructs the input features
+        # Passed in from GraphNetworkModule which constructs the input features
+        self.in_node_dim = in_node_dim
         self.node_hid_dim = config.node_hid_dim
         self.num_gcn_conv = config.num_gcn_conv
         self.use_bn = config.use_batch_norm

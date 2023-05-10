@@ -10,7 +10,7 @@ from mmf.models import BaseModel
 from mmf.modules.encoders import IdentityEncoder
 from mmf.utils.modeling import get_bert_configured_parameters
 from omegaconf import MISSING, OmegaConf
-from torch import Tensor, nn
+from torch import nn, Tensor
 
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,9 @@ class BaseTransformerModalityConfig:
     # This is actually: Union[EncoderFactory.Config, Encoder.Config]
     # NOTE: Waiting on https://github.com/omry/omegaconf/issues/144
     encoder: Any = IdentityEncoder.Config()
+    # when type is text, whether to consume raw text or intermediate representations
+    # from frozen text encoder. This can be potentially also used by other modalities.
+    consume_raw: bool = True
 
 
 @dataclass
@@ -148,7 +151,8 @@ class BaseTransformer(BaseModel):
         lr_multiplier = config.get("lr_multiplier", 1.0)
         if lr_multiplier != 1.0:
             logger.info(
-                f"Setting learning rate of {module_name} to be {base_lr} * {lr_multiplier}."
+                f"Setting learning rate of {module_name} to be "
+                f"{base_lr} * {lr_multiplier}."
             )  # noqa
             parameters += get_bert_configured_parameters(
                 module, base_lr * lr_multiplier

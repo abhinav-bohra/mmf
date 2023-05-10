@@ -1,18 +1,20 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 
 import collections
+import collections.abc
 import functools
 import json
 import logging
 import os
 import sys
 import time
-from typing import Any, Dict, Union
+from functools import wraps
+from typing import Any, Callable, Dict, Optional, Union
 
 import torch
 from mmf.common.registry import registry
 from mmf.utils.configuration import get_mmf_env
-from mmf.utils.distributed import get_rank, is_master, is_xla
+from mmf.utils.distributed import get_rank, is_main, is_xla
 from mmf.utils.file_io import PathManager
 from mmf.utils.timer import Timer
 from termcolor import colored
@@ -217,15 +219,26 @@ def summarize_report(
     should_print=True,
     extra=None,
     tb_writer=None,
+    wandb_logger=None,
 ):
     if extra is None:
         extra = {}
-    if not is_master() and not is_xla():
+    if not is_main() and not is_xla():
         return
+
+    # Log the learning rate if available
+    if wandb_logger and "lr" in extra:
+        wandb_logger.log_metrics(
+            {"train/learning_rate": float(extra["lr"])}, commit=False
+        )
 
     if tb_writer:
         scalar_dict = meter.get_scalar_dict()
         tb_writer.add_scalars(scalar_dict, current_iteration)
+
+    if wandb_logger:
+        metrics = meter.get_scalar_dict()
+        wandb_logger.log_metrics({**metrics, "trainer/global_step": current_iteration})
 
     if not should_print:
         return
@@ -256,7 +269,8 @@ def calculate_time_left(
     time_left = num_logs_left * time_taken_for_log
 
     snapshot_iteration = num_snapshot_iterations / log_interval
-    snapshot_iteration *= iterations_left / eval_interval
+    if eval_interval:
+        snapshot_iteration *= iterations_left / eval_interval
     time_left += snapshot_iteration * time_taken_for_log
 
     return timer.get_time_hhmmss(gap=time_left)
@@ -275,7 +289,7 @@ def log_progress(info: Union[Dict, Any], log_format="simple"):
     caller, key = _find_caller()
     logger = logging.getLogger(caller)
 
-    if not isinstance(info, collections.Mapping):
+    if not isinstance(info, collections.abc.Mapping):
         logger.info(info)
 
     if log_format == "simple":
@@ -301,6 +315,24 @@ def log_class_usage(component_type, klass):
     torch._C._log_api_usage_once(identifier)
 
 
+def skip_if_tensorboard_inactive(fn: Callable) -> Callable:
+    """
+    Checks whether summary writer is initialized and rank is 0 (main)
+    Args:
+        fn (Callable): Function which should be called based on whether
+            tensorboard should log or not
+    """
+
+    @wraps(fn)
+    def wrapped_fn(self, *args: Any, **kwargs: Any) -> Optional[Any]:
+        if self.summary_writer is None or not self._is_main:
+            return None
+        else:
+            return fn(self, *args, **kwargs)
+
+    return wrapped_fn
+
+
 # ColorfulFormatter is adopted from Detectron2 and adapted for MMF
 class ColorfulFormatter(logging.Formatter):
     def __init__(self, *args, **kwargs):
@@ -319,49 +351,143 @@ class ColorfulFormatter(logging.Formatter):
 
 class TensorboardLogger:
     def __init__(self, log_folder="./logs", iteration=0):
-        # This would handle warning of missing tensorboard
-        from torch.utils.tensorboard import SummaryWriter
-
-        self.summary_writer = None
-        self._is_master = is_master()
+        self._summary_writer = None
+        self._is_main = is_main()
         self.timer = Timer()
         self.log_folder = log_folder
         self.time_format = "%Y-%m-%dT%H:%M:%S"
+        current_time = self.timer.get_time_hhmmss(None, format=self.time_format)
+        self.tensorboard_folder = os.path.join(
+            self.log_folder, f"tensorboard_{current_time}"
+        )
 
-        if self._is_master:
-            current_time = self.timer.get_time_hhmmss(None, format=self.time_format)
-            tensorboard_folder = os.path.join(
-                self.log_folder, f"tensorboard_{current_time}"
+    @property
+    def summary_writer(self):
+        # Only on rank zero
+        if not self._is_main:
+            return None
+
+        if self._summary_writer is None:
+            # This would handle warning of missing tensorboard
+            from torch.utils.tensorboard import SummaryWriter
+
+            self._summary_writer = SummaryWriter(self.tensorboard_folder)
+
+        return self._summary_writer
+
+    @skip_if_tensorboard_inactive
+    def close(self):
+        """
+        Closes the tensorboard summary writer.
+        """
+        self.summary_writer.close()
+
+    @skip_if_tensorboard_inactive
+    def add_scalar(self, key, value, iteration):
+        self.summary_writer.add_scalar(key, value, iteration)
+
+    @skip_if_tensorboard_inactive
+    def add_scalars(self, scalar_dict, iteration):
+        for key, val in scalar_dict.items():
+            self.summary_writer.add_scalar(key, val, iteration)
+
+    @skip_if_tensorboard_inactive
+    def add_histogram_for_model(self, model, iteration):
+        for name, param in model.named_parameters():
+            np_param = param.clone().cpu().data.numpy()
+            self.summary_writer.add_histogram(name, np_param, iteration)
+
+
+class WandbLogger:
+    r"""
+    Log using `Weights and Biases`.
+
+    Args:
+        entity: An entity is a username or team name where you're sending runs.
+        config: Configuration for the run.
+        project: Name of the W&B project.
+
+    Raises:
+        ImportError: If wandb package is not installed.
+    """
+
+    def __init__(
+        self,
+        entity: Optional[str] = None,
+        config: Optional[Dict] = None,
+        project: Optional[str] = None,
+    ):
+        try:
+            import wandb
+        except ImportError:
+            raise ImportError(
+                "To use the Weights and Biases Logger please install wandb."
+                "Run `pip install wandb` to install it."
             )
-            self.summary_writer = SummaryWriter(tensorboard_folder)
+
+        self._wandb = wandb
+        self._wandb_init = dict(entity=entity, config=config, project=project)
+        wandb_kwargs = dict(config.training.wandb)
+        wandb_kwargs.pop("enabled")
+        wandb_kwargs.pop("entity")
+        wandb_kwargs.pop("project")
+        wandb_kwargs.pop("log_checkpoint")
+        self._wandb_init.update(**wandb_kwargs)
+
+        self.setup()
+
+    def setup(self):
+        """
+        Setup `Weights and Biases` for logging.
+        """
+        if is_main():
+            if self._wandb.run is None:
+                self._wandb.init(**self._wandb_init)
+
+            # define default x-axis (for latest wandb versions)
+            if getattr(self._wandb, "define_metric", None):
+                self._wandb.define_metric("trainer/global_step")
+                self._wandb.define_metric(
+                    "*", step_metric="trainer/global_step", step_sync=True
+                )
 
     def __del__(self):
-        if getattr(self, "summary_writer", None) is not None:
-            self.summary_writer.close()
+        if getattr(self, "_wandb", None) is not None:
+            self._wandb.finish()
 
-    def _should_log_tensorboard(self):
-        if self.summary_writer is None or not self._is_master:
+    def _should_log_wandb(self):
+        if self._wandb is None or not is_main():
             return False
         else:
             return True
 
-    def add_scalar(self, key, value, iteration):
-        if not self._should_log_tensorboard():
+    def log_metrics(self, metrics: Dict[str, float], commit=True):
+        """
+        Log the monitored metrics to the wand dashboard.
+
+        Args:
+            metrics (Dict[str, float]): A dictionary of metrics to log.
+            commit (bool): Save the metrics dict to the wandb server and
+                           increment the step. (default: True)
+        """
+        if not self._should_log_wandb():
             return
 
-        self.summary_writer.add_scalar(key, value, iteration)
+        self._wandb.log(metrics, commit=commit)
 
-    def add_scalars(self, scalar_dict, iteration):
-        if not self._should_log_tensorboard():
+    def log_model_checkpoint(self, model_path):
+        """
+        Log the model checkpoint to the wandb dashboard.
+
+        Args:
+            model_path (str): Path to the model file.
+        """
+        if not self._should_log_wandb():
             return
 
-        for key, val in scalar_dict.items():
-            self.summary_writer.add_scalar(key, val, iteration)
+        model_artifact = self._wandb.Artifact(
+            "run_" + self._wandb.run.id + "_model", type="model"
+        )
 
-    def add_histogram_for_model(self, model, iteration):
-        if not self._should_log_tensorboard():
-            return
-
-        for name, param in model.named_parameters():
-            np_param = param.clone().cpu().data.numpy()
-            self.summary_writer.add_histogram(name, np_param, iteration)
+        model_artifact.add_file(model_path, name="current.pt")
+        self._wandb.log_artifact(model_artifact, aliases=["latest"])

@@ -1,12 +1,13 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 import collections
+import collections.abc
 import copy
 import warnings
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
-from mmf.common.sample import SampleList, detach_tensor
+from mmf.common.sample import detach_tensor, SampleList
 
 
 class Report(OrderedDict):
@@ -98,7 +99,7 @@ class Report(OrderedDict):
                 if key not in fields:
                     continue
             self[key] = fn(self[key])
-            if isinstance(self[key], collections.MutableSequence):
+            if isinstance(self[key], collections.abc.MutableSequence):
                 for idx, item in enumerate(self[key]):
                     self[key][idx] = fn(item)
             elif isinstance(self[key], dict):
@@ -166,6 +167,8 @@ class Report(OrderedDict):
                 continue
             if isinstance(self[key], torch.Tensor):
                 self[key] = torch.cat((self[key], report[key]), dim=0)
+            elif isinstance(self[key], List):
+                self[key].extend(report[key])
 
         self._accumulate_loss(report)
 
@@ -176,7 +179,7 @@ class Report(OrderedDict):
                     f"{key} not found in report. Loss calculation "
                     + "might not work as expected."
                 )
-                continue
+                self.losses[key] = value
             if isinstance(self.losses[key], torch.Tensor):
                 self.losses[key] += value
 

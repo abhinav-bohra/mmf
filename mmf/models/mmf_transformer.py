@@ -16,7 +16,7 @@ from mmf.models.transformers.heads.mlp import MLP
 from mmf.modules.encoders import ResNet152ImageEncoder
 from mmf.utils.build import build_encoder
 from omegaconf import MISSING, OmegaConf
-from torch import Tensor, nn
+from torch import nn, Tensor
 
 
 logger = logging.getLogger(__name__)
@@ -131,6 +131,14 @@ class MMFTransformer(BaseTransformer):
             if modality.type == "image" and self.config.get(
                 "freeze_image_encoder", False
             ):
+                logger.info("Freezing image encoder...")
+                for param in encoder.parameters():
+                    param.requires_grad = False
+
+            if modality.type == "text" and self.config.get(
+                "freeze_text_encoder", False
+            ):
+                logger.info("Freezing text encoder...")
                 for param in encoder.parameters():
                     param.requires_grad = False
 
@@ -378,30 +386,32 @@ class MMFTransformer(BaseTransformer):
         for modality in self.modality_keys:
             mlm_labels_list.append(mlm_labels[modality])
 
-        mlm_labels["combined_labels"] = torch.cat(mlm_labels_list, dim=-1)
+        if mlm_labels_list:
+            mlm_labels["combined_labels"] = torch.cat(mlm_labels_list, dim=-1)
 
         return mlm_labels
 
     def forward(self, sample_list: Dict[str, Tensor]) -> Dict[str, Tensor]:
         # Sample preprocess
-        processed_sample_list = self.preprocess_sample(sample_list)
+        orig_and_processed_sample_list = self.preprocess_sample(sample_list)
 
+        orig_and_processed_sample_list["target_key"] = sample_list
         # Arrange masks in a list
         masks = []
         for modality in self.modality_keys:
-            masks.append(processed_sample_list["masks"][modality])
+            masks.append(orig_and_processed_sample_list["masks"][modality])
 
         # Call transformer backend
         sequence_output, encoded_layers = self.backend(
-            processed_sample_list["input_ids"],
-            processed_sample_list["position_ids"],
-            processed_sample_list["segment_ids"],
+            orig_and_processed_sample_list["input_ids"],
+            orig_and_processed_sample_list["position_ids"],
+            orig_and_processed_sample_list["segment_ids"],
             masks,
         )
 
         # Transformer Heads
         return self.postprocess_output(
-            sequence_output, encoded_layers, processed_sample_list
+            sequence_output, encoded_layers, orig_and_processed_sample_list
         )
 
     def postprocess_output(

@@ -130,7 +130,7 @@ class MoVieMcan(BaseModel):
             self.config.classifier.type,
             in_dim=combined_embedding_dim,
             out_dim=num_choices,
-            **params
+            **params,
         )
 
     def _init_extras(self):
@@ -185,7 +185,6 @@ class MoVieMcan(BaseModel):
     def process_text_embedding(
         self, sample_list: Dict[str, Any], embedding_attr: str = "text_embeddings"
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-
         # Get "text" attribute in case of "text_embeddings" case
         # and "context" attribute in case of "context_embeddings"
         texts = getattr(sample_list, embedding_attr.split("_")[0])

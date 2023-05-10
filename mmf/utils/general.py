@@ -15,7 +15,7 @@ import torch
 from mmf.utils.distributed import get_rank, get_world_size, is_xla
 from mmf.utils.file_io import PathManager
 from packaging import version
-from torch import Tensor, nn
+from torch import nn, Tensor
 
 
 logger = logging.getLogger(__name__)
@@ -418,7 +418,7 @@ def get_current_device():
         import torch_xla.core.xla_model as xm
 
         return xm.xla_device()
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() and torch.cuda.is_initialized():
         return f"cuda:{torch.cuda.current_device()}"
     else:
         return torch.device("cpu")
@@ -456,7 +456,7 @@ def retry_n(n: int, fn: Callable, *args, log_tries=False, **kwargs) -> Any:
                         f"Try {count + 1}/{n} failed for {fn.__name__}. Will retry "
                         f"after {2 ** count} second(s)."
                     )
-                time.sleep(2 ** count)
+                time.sleep(2**count)
                 count += 1
             else:
                 raise

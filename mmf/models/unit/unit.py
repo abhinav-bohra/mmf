@@ -8,15 +8,19 @@ import torch
 from mmf.common.registry import registry
 from mmf.models import BaseModel
 from mmf.models.unit.unit_base_model import (
-    MLP,
     AttributeHead,
-    UniTBaseModel,
     build_detection_loss,
+    MLP,
+    UniTBaseModel,
 )
 from mmf.modules.encoders import TransformerEncoder
 from mmf.utils.distributed import byte_tensor_to_object
-from torch import Tensor, nn
-from transformers.modeling_bert import BertPredictionHeadTransform
+from torch import nn, Tensor
+
+try:
+    from transformers3.modeling_bert import BertPredictionHeadTransform
+except ImportError:
+    from transformers.modeling_bert import BertPredictionHeadTransform
 
 
 logger = logging.getLogger(__name__)

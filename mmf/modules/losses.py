@@ -187,21 +187,38 @@ class MMFLoss(nn.Module):
             self.loss_criterion = loss_class(**loss_params)
 
     def forward(self, sample_list: Dict[str, Tensor], model_output: Dict[str, Tensor]):
-        loss = self.loss_criterion(sample_list, model_output)
+        loss_dict = {}
+        if hasattr(self.loss_criterion, "datasets"):
+            datasets = self.loss_criterion.datasets
+            if (
+                isinstance(datasets, list)
+                and sample_list["dataset_name"] not in datasets
+            ):
+                return loss_dict
 
-        if not isinstance(loss, torch.Tensor):
-            loss = torch.tensor(loss, dtype=torch.float)
+        loss_result = self.loss_criterion(sample_list, model_output)
 
-        if loss.dim() == 0:
-            loss = loss.view(1)
+        if not isinstance(loss_result, collections.abc.Mapping):
+            loss_result = {"": loss_result}
 
-        if not torch.jit.is_scripting():
-            key = "{}/{}/{}".format(
-                sample_list.dataset_type, sample_list.dataset_name, self.name
-            )
-        else:
-            key = f"{self.name}"
-        return {key: loss}
+        for child_loss_name, child_loss_result in loss_result.items():
+            if not isinstance(child_loss_result, torch.Tensor):
+                child_loss_result = torch.tensor(child_loss_result, dtype=torch.float)
+
+            if child_loss_result.dim() == 0:
+                child_loss_result = child_loss_result.view(1)
+
+            if not torch.jit.is_scripting():
+                key = "{}/{}/{}".format(
+                    sample_list.dataset_type, sample_list.dataset_name, self.name
+                )
+            else:
+                key = f"{self.name}"
+
+            key = f"{key}/{child_loss_name}" if child_loss_name else key
+            loss_dict[key] = child_loss_result
+
+        return loss_dict
 
 
 @registry.register_loss("logit_bce")
@@ -816,4 +833,293 @@ class CosineEmbeddingLoss(nn.Module):
         scores = model_output["scores"]
         y = torch.ones(targets.size(0)).to(targets.device)
         loss = self.loss_fn(scores, targets, y)
+        return loss
+
+
+@registry.register_loss("bce_kl")
+class BCEAndKLLoss(nn.Module):
+    """binary_cross_entropy_with_logits and kl divergence loss.
+    Calculates both losses and returns a dict with string keys.
+    Similar to bce_kl_combined, but returns both losses.
+    """
+
+    def __init__(self, weight_softmax):
+        super().__init__()
+        self.weight_softmax = weight_softmax
+
+    def forward(self, sample_list, model_output):
+        pred_score = model_output["scores"]
+        target_score = sample_list["targets"]
+
+        tar_sum = torch.sum(target_score, dim=1, keepdim=True)
+        tar_sum_is_0 = torch.eq(tar_sum, 0)
+        tar_sum.masked_fill_(tar_sum_is_0, 1.0e-06)
+        tar = target_score / tar_sum
+
+        res = F.log_softmax(pred_score, dim=1)
+        loss1 = kl_div(res, tar)
+        loss1 = torch.sum(loss1) / loss1.size(0)
+
+        loss2 = F.binary_cross_entropy_with_logits(
+            pred_score, target_score, reduction="mean"
+        )
+        loss2 *= target_score.size(1)
+
+        loss = {"kl": self.weight_softmax * loss1, "bce": loss2}
+
+        return loss
+
+
+def calc_ms_loss(pair, base, param, multiplier):
+    return (
+        1.0
+        / param
+        * torch.log(1 + torch.sum(torch.exp(multiplier * param * (pair - base))))
+    )
+
+
+@registry.register_loss("refiner_ms")
+class RefinerMSLoss(nn.Module):
+
+    """
+    A Multi-Similarity loss between the decoder outputs of a given embedding size
+    and its targets
+
+    This loss pulls the decoded signal of a sample closer to its target,
+    while simultaneously pushing it away from other targets
+
+    References:
+
+    1) Wang et al., Multi-Similarity Loss With General Pair Weighting
+    for Deep Metric Learning, CVPR 2019
+    2) Sankaran, S., Yang, D. and Lim, S.N., "Multimodal Fusion Refiner Networks"
+
+    Parameters:
+
+        same as ms_loss (see below)
+
+    """
+
+    def __init__(
+        self,
+        alpha: float = 50,
+        beta: float = 2,
+        base: float = 0.5,
+        margin: float = 0.1,
+        epsilon: float = 1e-16,
+    ):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.margin = margin
+        self.base = base
+        self.epsilon = epsilon
+
+    def forward(self, sample_list, model_output):
+        targets = sample_list["targets"]
+        inputs = model_output["scores"]
+        n = inputs.size(0)
+        sim_mat = torch.matmul(inputs, targets.t())
+        loss = []
+
+        for i in range(n):
+            # pos pair is the similarity between the refiner output (input to forward)
+            # and target (original encoding)
+            pos_pair = sim_mat[i][i]
+            # neg pair is all the remaining pairs
+            neg_pairs_all = sim_mat[i]
+            # remove the pos_par from neg_pairs
+            neg_pairs_all = neg_pairs_all[abs(neg_pairs_all - pos_pair) > self.epsilon]
+            # All pairs whose similarity is within a margin of the pos_pair similarity
+            neg_pairs = neg_pairs_all[neg_pairs_all + self.margin > pos_pair]
+
+            # nothing to do if there are no negative pairs from line 918
+            if len(neg_pairs) < 1:
+                continue
+
+            pos_loss = calc_ms_loss(pos_pair, self.base, self.beta, -1)
+            neg_loss = calc_ms_loss(neg_pairs, self.base, self.alpha, 1)
+            loss.append(pos_loss + neg_loss)
+        if n > 0:
+            loss = sum(loss) / n
+        else:
+            loss = inputs.new_zeros(1, requires_grad=True)
+        return loss
+
+
+@registry.register_loss("ms_loss")
+class MSLoss(nn.Module):
+
+    """
+    A Multi-Similarity loss between embeddings of similar and dissimilar
+    labels is implemented here.
+
+    Reference:
+
+    "Multi-similarity loss with general pair weighting for deep metric learning"
+
+    Args:
+
+        alpha, beta, margin: parameters used in loss function calculation
+        hard_mining: if true, select only the hardest examples (defined based on margin)
+        is_multilabel: True if there are more than two labels, false otherwise
+
+    """
+
+    def __init__(
+        self, alpha=50, beta=2, margin=0.5, hard_mining=True, is_multilabel=False
+    ):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.hard_mining = hard_mining
+        self.margin = margin
+        self.is_multilabel = is_multilabel
+
+    def get_positive_and_negative_pairs(self, sim_vec, targets, curr_target):
+        # given a sample with a similarity vec (embedding similarity to other samples)
+        # return pairs of samples which share the same targets/labels (positive pairs)
+        # and pairs of samples which have different labels (negative pairs)
+        if self.is_multilabel:
+            pos_pair_ = torch.masked_select(
+                sim_vec, torch.matmul(targets, targets[0]) > 0
+            )
+        else:
+            pos_pair_ = torch.masked_select(sim_vec, targets == curr_target)
+
+        #  remove itself
+        pos_pair_ = torch.masked_select(pos_pair_, pos_pair_ < 1 - 1e-5)
+        pos_pair_ = torch.sort(pos_pair_)[0]
+
+        if self.is_multilabel:
+            neg_pair_ = torch.masked_select(
+                sim_vec, torch.matmul(targets, targets[0]) < 1e-5
+            )
+        else:
+            neg_pair_ = torch.masked_select(sim_vec, targets != curr_target)
+        neg_pair_ = torch.sort(neg_pair_)[0]
+
+        if len(pos_pair_) == 0 or len(neg_pair_) == 0:
+            return (pos_pair_, neg_pair_)
+
+        if self.hard_mining is not None:
+            neg_pair = torch.masked_select(neg_pair_, neg_pair_ + 0.1 > pos_pair_[0])
+            pos_pair = torch.masked_select(pos_pair_, pos_pair_ - 0.1 < neg_pair_[-1])
+            neg_pair_ = neg_pair
+            pos_pair_ = pos_pair
+        return (pos_pair_, neg_pair_)
+
+    def forward(self, sample_list, model_output):
+        # get the fused features and normalize
+        fusion_features = model_output["fused_embedding"]
+        inputs = F.normalize(fusion_features)
+
+        # get the targets
+        targets = sample_list["targets"]
+
+        batch_size = inputs.size(0)
+        # sim_mat(i,j) contains the similarity between fused_embeddings of ith
+        # and jth samples in a batch
+        sim_mat = torch.matmul(inputs, inputs.t())
+
+        # this is the margin allowed for multi-similarity loss
+        base = self.margin
+
+        loss = []
+
+        for i in range(batch_size):
+            (pos_pair_, neg_pair_) = self.get_positive_and_negative_pairs(
+                sim_mat[i], targets, targets[i]
+            )
+            # no compute needed when one of the pairs is not available
+            if len(pos_pair_) == 0 or len(neg_pair_) == 0:
+                continue
+
+            pos_loss = calc_ms_loss(pos_pair_, base, self.beta, -1)
+            neg_loss = calc_ms_loss(neg_pair_, base, self.alpha, 1)
+            loss.append(pos_loss + neg_loss)
+
+        if len(loss) == 0:
+            loss = inputs.new_zeros(1, requires_grad=True)
+        else:
+            loss = sum(loss) / batch_size
+
+        return loss
+
+
+@registry.register_loss("refiner_contrastive_loss")
+class RefinerContrastiveLoss(nn.Module):
+
+    """
+    A contrastive loss between the decoder outputs of a given embedding size
+    and its targets
+
+    This loss can be used in lieu of a reconstruction loss, wherein the goal
+    is to get a decoded signal closer to its target than other targets. As long
+    as the reconstructed signal of a given input is closer to its target than
+    any other target, the loss will remain zero.
+
+    Reference:
+
+    Sankaran, S., Yang, D. and Lim, S.N., "Multimodal Fusion Refiner Networks"
+
+    Parameters:
+
+        sim_thresh: similarity threshold used to consider only samples beyond
+        # this threshold
+
+    """
+
+    def __init__(self, sim_thresh=0.1, epsilon=1e-16):
+        super().__init__()
+        self.similarity_threshold = sim_thresh
+        self.epsilon = epsilon
+
+    def forward(self, sample_list, model_output):
+        targets = sample_list["targets"]
+        inputs = model_output["scores"]
+
+        batch_size = inputs.size(0)
+        # normalize inputs and targets
+        inputs = F.normalize(inputs)
+        targets = F.normalize(targets)
+
+        # matrix containing the similarity between the inputs and targets
+        # (i,j) contains similarity betweeh the i^th decoder and j^th target
+        sim_mat = torch.matmul(inputs, targets.t())
+
+        loss = []
+
+        for i in range(batch_size):
+            sim_ij = sim_mat[i]
+            # pos_similarity contains the similarity between i^th decoder
+            # and i^th target
+            pos_similarity = sim_ij[i]
+
+            # neg_pair_ contains all the batch samples whose similarity with i^th
+            #  decoder is better than a threshold corrected similarity between
+            # i^th decoder and i^th target
+
+            neg_pair_ = torch.masked_select(
+                sim_ij, sim_ij > pos_similarity - self.similarity_threshold
+            )
+
+            # remove the pos_pair from the neg_pair list
+            neg_pair_ = torch.masked_select(
+                neg_pair_, abs(neg_pair_ - pos_similarity) > self.epsilon
+            )
+
+            # The loss is non-zero only when there exists at least one sample whose
+            # target is closer to the decoded signal.
+            if neg_pair_.shape[0] > 0:
+                neg_loss = torch.mean(
+                    self.similarity_threshold + neg_pair_ - pos_similarity
+                )
+                loss.append(neg_loss)
+
+        if len(loss) == 0:
+            loss = inputs.new_zeros(1, requires_grad=True)
+        else:
+            loss = sum(loss) / batch_size
+
         return loss
